@@ -11,6 +11,10 @@ const donationSchema = new mongoose.Schema({
   status: { type: String, enum: ["pending", "active", "completed", "failed", "cancelled"], default: "pending" },
   message: { type: String },
   sourcePage: { type: String },
+  // Identifies which temple site the donation originated from.
+  // "vizag" = Hare Krishna Movement Visakhapatnam (default for backwards compat)
+  // "kakinada" = ISKCON Kakinada
+  site: { type: String, enum: ["vizag", "kakinada"], default: "vizag", index: true },
   sevaName: { type: String },
   legacySevaId: { type: Number },
   paymentAccount: { type: String },

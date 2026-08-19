@@ -255,6 +255,15 @@ const resolveEnrolledBy = (donation) => {
     return Number(donation.dccEnrolledById);
   }
 
+  // Kakinada site donations use a separate enrolledBy ID
+  if (donation && donation.site === "kakinada") {
+    return Number(
+      process.env.DCC_ENROLLED_BY_KAKINADA ||
+      process.env.DCC_ENROLLED_BY ||
+      36
+    );
+  }
+
   if (isSpecialEnrolledByDonation(donation)) {
     return Number(
       process.env.DCC_ENROLLED_BY_DONATIONS_AND_JANMASHTAMI ||

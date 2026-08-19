@@ -156,6 +156,7 @@ const paymentController = {
         sevaName,
         legacySevaId,
         message,
+        site,
       } = req.body;
 
       if (!amount || Number(amount) < 1) {
@@ -204,6 +205,7 @@ const paymentController = {
         legacySevaId,
         message: message || undefined,
         paymentAccount: account.name,
+        site: site || "vizag",
         panNumber: panNumber || req.body.panNumber,
         certificate: certificate || req.body.certificate,
         sevakName: sevakName || req.body.sevakName || undefined,
@@ -278,7 +280,7 @@ const paymentController = {
     try {
       const {
         name, email, mobile, amount, certificate, panNumber,
-        sourcePage, sevaName, sevaUnitLabel,
+        sourcePage, sevaName, sevaUnitLabel, site,
       } = req.body;
 
       if (!amount || Number(amount) < 1) {
@@ -345,6 +347,7 @@ const paymentController = {
         panNumber: panNumber || req.body.panNumber,
         certificate: certificate || req.body.certificate,
         subscriptionId: subscription.id,
+        site: site || "vizag",
         isRecurring: true,
         status: 'pending',
         campaignerSlug: req.body.campaignerSlug || undefined,

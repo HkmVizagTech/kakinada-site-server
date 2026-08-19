@@ -432,7 +432,7 @@ const donationController = {
         donorName, donorEmail, donorMobile, amount, type, sevaName,
         utrNumber, manualPaymentMode, paymentDate, manualEntryNote,
         panNumber, certificate, wantPrasadam, prasadamAddress,
-        sevakName, dob, devoteeId,
+        sevakName, dob, devoteeId, site,
       } = req.body;
 
       const name = String(donorName || "").trim();
@@ -483,6 +483,7 @@ const donationController = {
         manualEntryNote: manualEntryNote || undefined,
         manualEnteredBy: req.user?.userId || undefined,
         dccEnrolledById,
+        site: site || "vizag",
         panNumber: panNumber || undefined,
         certificate: !!certificate,
         wantPrasadam: !!wantPrasadam,
