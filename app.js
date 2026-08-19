@@ -1,0 +1,125 @@
+const express = require("express");
+const cors = require("cors");
+const cookieParser = require("cookie-parser");
+const compression = require("compression");
+const helmet = require("helmet");
+const mongoose = require('mongoose');
+
+
+const { userRouter } = require("./src/routes/user.routes");
+const { eventRouter } = require("./src/routes/event.routes");
+const { galleryRouter } = require("./src/routes/gallery.routes");
+const { donationRouter } = require("./src/routes/donation.routes");
+const { donationPageRouter } = require("./src/routes/donationPage.routes");
+const { donationAdminRouter } = require("./src/routes/donationAdmin.routes");
+const { festivalDonationRouter } = require("./src/routes/festivalDonation.routes");
+const { paymentRouter } = require("./src/routes/payment.routes");
+const { importantDateRouter } = require("./src/routes/importantDate.routes.js");
+const { blogRouter } = require("./src/routes/blog.routes");
+const { contactMessageRouter } = require("./src/routes/contactMessage.routes");
+const { dashboardRouter } = require("./src/routes/dashboard.routes");
+const { devoteeRouter } = require("./src/routes/devotee.routes");
+const { siteContentRouter } = require("./src/routes/siteContent.routes");
+const { heroBannerRouter } = require("./src/routes/heroBanner.routes");
+const { mediaRouter } = require("./src/routes/media.routes");
+const { volunteerRouter } = require("./src/routes/volunteer.routes");
+const { blogProxyRouter } = require("./src/routes/blogProxy.routes");
+const app = express();
+
+const allowedOrigins = new Set([
+  process.env.FRONTEND_URL,
+  'https://hkmsite2-0-client-9fyg.vercel.app',
+  'https://harekrishnavizag.org',
+  'https://www.harekrishnavizag.org',
+  'http://localhost:3000',
+  'http://localhost:8080',
+  // TODO: Add KKD site domain once deployed
+].filter(Boolean));
+
+app.use(
+  cors({
+    origin: (origin, callback) => {
+
+      if (!origin) return callback(null, true);
+      if (allowedOrigins.has(origin)) return callback(null, true);
+
+      try {
+        const hostname = new URL(origin).hostname;
+        if (hostname.endsWith('.vercel.app')) return callback(null, true);
+        if (hostname === 'harekrishnavizag.org' || hostname.endsWith('.harekrishnavizag.org')) return callback(null, true);
+      } catch (e) {
+
+      }
+
+      return callback(new Error('CORS policy: Origin not allowed'));
+    },
+    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization', 'Accept', 'Origin', 'X-Requested-With'],
+    exposedHeaders: ['Set-Cookie', 'Authorization'],
+    credentials: true,
+    optionsSuccessStatus: 204,
+  })
+);
+
+
+// gzip/brotli-compress responses (blog HTML, donor lists, etc.) — cheap
+// bandwidth/latency win, applied before routes so it covers everything.
+// Baseline security headers. crossOriginResourcePolicy is relaxed since
+// this API serves JSON/images to a different origin (the Vercel frontend) —
+// the strict default would block legitimate cross-origin fetches.
+app.use(helmet({ crossOriginResourcePolicy: { policy: "cross-origin" } }));
+app.use(compression());
+
+app.use(cookieParser());
+
+// Razorpay webhooks MUST receive the raw request body so the route-level
+// express.raw() can hand the controller an untouched Buffer for HMAC
+// signature verification. If the global express.json() below runs first,
+// it consumes the stream and sets req.body to a parsed OBJECT — the
+// controller then hashes "[object Object]" instead of the real payload and
+// EVERY webhook fails signature validation (400 Invalid signature). That is
+// exactly what got the live webhook disabled by Razorpay. Skipping these
+// paths here lets the per-route express.raw() in payment.routes.js win.
+const WEBHOOK_PATHS = new Set([
+  "/payments/webhook",
+  "/payments/webhook/donations",
+  "/payments/webhook/touchstone",
+]);
+const globalJson = express.json({ limit: '10mb' }); // increased for rich CKEditor HTML payloads
+app.use((req, res, next) => {
+  if (WEBHOOK_PATHS.has(req.path)) return next();
+  return globalJson(req, res, next);
+});
+
+app.use("/payments", paymentRouter);
+app.use("/users", userRouter);
+app.use("/events", eventRouter);
+app.use("/gallery", galleryRouter);
+app.use("/donations", donationRouter);
+app.use("/donation-page", donationPageRouter);
+app.use("/donations-admin", donationAdminRouter);
+app.use("/blogs", blogRouter);
+app.use("/contact-messages", contactMessageRouter);
+app.use("/dashboard", dashboardRouter);
+app.use("/devotees", devoteeRouter);
+app.use("/site-content", siteContentRouter);
+app.use("/hero-banners", heroBannerRouter);
+app.use("/temple-devotees", require("./src/routes/templeDevotee.routes").templeDevoteeRouter);
+app.use("/media", mediaRouter);
+
+app.use("/important-dates", importantDateRouter);
+app.use("/festival-donations", festivalDonationRouter);
+app.use("/volunteers", volunteerRouter);
+app.use("/blogs-proxy", blogProxyRouter);
+
+// dev routes removed for production safety
+
+
+app.get('/health', (req, res) => {
+  const states = ['disconnected', 'connected', 'connecting', 'disconnecting'];
+  const dbState = mongoose && mongoose.connection ? mongoose.connection.readyState : 0;
+  const ok = dbState === 1;
+  res.status(ok ? 200 : 503).json({ server: 'ok', db: { state: states[dbState] || dbState } });
+});
+
+module.exports = { app };
