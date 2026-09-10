@@ -31,9 +31,10 @@ const allowedOrigins = new Set([
   'https://hkmsite2-0-client-9fyg.vercel.app',
   'https://harekrishnavizag.org',
   'https://www.harekrishnavizag.org',
+  'https://iskconkakinada.org',
+  'https://www.iskconkakinada.org',
   'http://localhost:3000',
   'http://localhost:8080',
-  // TODO: Add KKD site domain once deployed
 ].filter(Boolean));
 
 app.use(
@@ -47,11 +48,16 @@ app.use(
         const hostname = new URL(origin).hostname;
         if (hostname.endsWith('.vercel.app')) return callback(null, true);
         if (hostname === 'harekrishnavizag.org' || hostname.endsWith('.harekrishnavizag.org')) return callback(null, true);
+        if (hostname === 'iskconkakinada.org' || hostname.endsWith('.iskconkakinada.org')) return callback(null, true);
       } catch (e) {
 
       }
 
-      return callback(new Error('CORS policy: Origin not allowed'));
+      // Reject with 403 (not an thrown error → 500) so blocked origins get a
+      // clear, deliberate status, and log the origin so allowlist gaps show
+      // up immediately in the Railway logs instead of mysterious failures.
+      console.warn(`[CORS] Blocked origin: ${origin}`);
+      return callback(null, false);
     },
     methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
     allowedHeaders: ['Content-Type', 'Authorization', 'Accept', 'Origin', 'X-Requested-With'],

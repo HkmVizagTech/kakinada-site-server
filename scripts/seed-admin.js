@@ -48,9 +48,16 @@ const userSchema = new mongoose.Schema(
 );
 const User = mongoose.model("User", userSchema);
 
-const EMAIL = "admin@iskconkakinada.org";
-const PASSWORD = "Iskonkkd@108";
-const NAME = "ISKCON Kakinada Admin";
+// Credentials come from .env / environment — never hardcoded, so the
+// script can't accidentally ship a public admin password.
+const EMAIL = process.env.ADMIN_EMAIL;
+const PASSWORD = process.env.ADMIN_PASSWORD;
+const NAME = process.env.ADMIN_NAME || "ISKCON Kakinada Admin";
+
+if (!EMAIL || !PASSWORD) {
+  console.error("❌ ADMIN_EMAIL and ADMIN_PASSWORD must be set in .env or environment");
+  process.exit(1);
+}
 
 async function main() {
   console.log("Connecting to MongoDB…");
@@ -72,7 +79,6 @@ async function main() {
 
   console.log(`✅ Admin created!`);
   console.log(`   Email:    ${EMAIL}`);
-  console.log(`   Password: ${PASSWORD}`);
   console.log(`   Role:     ${user.role}`);
   console.log(`   ID:       ${user._id}`);
 
