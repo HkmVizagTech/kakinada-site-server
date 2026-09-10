@@ -10,6 +10,15 @@ if (!accountId) {
     "[R2] WARNING: R2_ACCOUNT_ID is not set — uploads will fail with a confusing " +
     "SSL handshake error. Set it in Railway → Variables."
   );
+} else {
+  const ak = process.env.R2_ACCESS_KEY_ID || "";
+  const sk = process.env.R2_SECRET_ACCESS_KEY || "";
+  console.log(
+    `[R2] Config loaded — accountId: ${accountId.slice(0, 6)}…, ` +
+    `accessKey: ${ak ? ak.slice(0, 6) + "…" : "MISSING"}, ` +
+    `secretKey: ${sk ? sk.slice(0, 6) + "…" : "MISSING"}, ` +
+    `bucket: ${process.env.R2_BUCKET_NAME || "MISSING"}`
+  );
 }
 const endpoint = `https://${accountId}.r2.cloudflarestorage.com`;
 

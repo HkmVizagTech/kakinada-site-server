@@ -5,7 +5,7 @@ const blogProxyRouter = express.Router();
 
 // Vizag server base URL — set via env var
 const VIZAG_API_URL =
-  (process.env.VIZAG_API_URL || "https://hkmsite2-0-server.vercel.app").replace(/\/+$/, "");
+  (process.env.VIZAG_API_URL || "https://hkmsite20-server-production.up.railway.app").replace(/\/+$/, "");
 
 // PUBLIC — proxy the Vizag blog landing data
 // Returns recents, devotional, categories, byCategory, popular, recent
