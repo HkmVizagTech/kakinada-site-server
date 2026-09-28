@@ -25,7 +25,7 @@
 // so putting the campaign in both places would say "Sri Krishna Janmashtami"
 // twice in a four-line message. {{3}} is the more prominent slot, so it wins.
 
-const SITE_URL = (process.env.FRONTEND_URL || "https://www.iskconkakinada.org").replace(/\/+$/, "");
+const SITE_URL = (process.env.FRONTEND_URL || "https://iskconkakinada.org").replace(/\/+$/, "");
 
 // A parameter longer than this is more likely to look broken on a phone than
 // to be helpful, so an over-long "seva (campaign)" falls back to the bare seva
