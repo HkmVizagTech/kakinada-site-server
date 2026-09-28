@@ -13,10 +13,17 @@ if (!accountId) {
 } else {
   const ak = process.env.R2_ACCESS_KEY_ID || "";
   const sk = process.env.R2_SECRET_ACCESS_KEY || "";
+  // Report only whether each credential is PRESENT, never any part of its
+  // value. This line used to print the first six characters of the secret
+  // access key on every boot, which then sat in the deploy logs — readable by
+  // anyone with log access, and copied into any screenshot of a startup
+  // problem. Six characters is not enough to use, but a secret that is partly
+  // public is a secret due for rotation, and there is no reason to spend it:
+  // "set" / "MISSING" answers the only question this line exists to answer.
   console.log(
     `[R2] Config loaded — accountId: ${accountId.slice(0, 6)}…, ` +
-    `accessKey: ${ak ? ak.slice(0, 6) + "…" : "MISSING"}, ` +
-    `secretKey: ${sk ? sk.slice(0, 6) + "…" : "MISSING"}, ` +
+    `accessKey: ${ak ? "set" : "MISSING"}, ` +
+    `secretKey: ${sk ? "set" : "MISSING"}, ` +
     `bucket: ${process.env.R2_BUCKET_NAME || "MISSING"}`
   );
 }

@@ -1,16 +1,21 @@
-const cloudinary = require('cloudinary').v2;
+// RETIRED — kept as a stub so nothing that still imports this path crashes.
+//
+// Image uploads moved to Cloudflare R2 (src/utils/r2.js, a drop-in replacement
+// with the same call signature). Nothing in this server imported this module
+// any more, but the `cloudinary` package it required was still installed and
+// dragged in a vulnerable lodash. Removing the dependency meant this file had
+// to stop requiring it — hence the stub rather than a deletion, so any
+// straggler import fails loudly and usefully instead of with MODULE_NOT_FOUND.
+const RETIRED =
+  "utils/cloudinary.js is retired — use uploadToR2() from utils/r2.js instead.";
 
-cloudinary.config({
-  cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
-  api_key: process.env.CLOUDINARY_API_KEY,
-  api_secret: process.env.CLOUDINARY_API_SECRET,
-});
-
-const uploadToCloudinary = async (filePath, folder = 'events') => {
-  return await cloudinary.uploader.upload(filePath, {
-    folder,
-    resource_type: 'image',
-  });
+const uploadToCloudinary = async () => {
+  throw new Error(RETIRED);
 };
 
-module.exports = { cloudinary, uploadToCloudinary };
+module.exports = {
+  get cloudinary() {
+    throw new Error(RETIRED);
+  },
+  uploadToCloudinary,
+};
