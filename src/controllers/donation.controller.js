@@ -1,5 +1,7 @@
 const { donationModel } = require("../models/donation.model");
 const { createRazorpayInstance } = require("./payment.controller");
+const { prisma } = require("../lib/prisma");
+const { buildWhere } = require("../lib/sqlFilter");
 
 // The standalone /donations page is fully separate from the rest of the
 // site's donation flows (seva pages, sqft campaign, janmashtami) and has
@@ -52,10 +54,21 @@ const donationController = {
         ],
       };
 
+      // ── Reporting queries ───────────────────────────────────────────
+      // These were Mongo aggregation pipelines. They are now plain SQL via
+      // $queryRaw, and the shared $match filters are compiled by buildWhere()
+      // so the same filter objects still apply. Shape notes:
+      //   * SUM/COUNT return a single row, not an array (Mongo always returned
+      //     an array, so the old code read `agg[0]?.total`).
+      //   * EXTRACT(YEAR/MONTH ...) is used instead of Mongo's $year/$month.
+      //   * countDocuments() still goes through the compat layer, unchanged.
+      const baseWhere = buildWhere(completedBase);
+      const B = baseWhere.params;
+
       const [
-        totalAgg,
-        thisMonthAgg,
-        lastMonthAgg,
+        totalRow,
+        thisMonthRow,
+        lastMonthRow,
         totalTransactions,
         donorIdentities,
         monthlyAgg,
@@ -63,69 +76,84 @@ const donationController = {
         needsAttentionCount,
       ] = await Promise.all([
         // Total collected (completed only)
-        donationModel.aggregate([
-          { $match: completedBase },
-          { $group: { _id: null, total: { $sum: "$amount" }, count: { $sum: 1 } } },
-        ]),
+        prisma.$queryRawUnsafe(
+          `SELECT COALESCE(SUM("amount"), 0) AS total, COUNT(*)::int AS count
+             FROM "donations" ${baseWhere.sql}`,
+          ...B
+        ).then((r) => r[0]),
         // This month (completed)
-        donationModel.aggregate([
-          { $match: { ...completedBase, createdAt: { $gte: startOfMonth } } },
-          { $group: { _id: null, total: { $sum: "$amount" } } },
-        ]),
+        prisma.$queryRawUnsafe(
+          `SELECT COALESCE(SUM("amount"), 0) AS total
+             FROM "donations" ${baseWhere.sql ? baseWhere.sql + " AND" : "WHERE"} "createdAt" >= $${B.length + 1}`,
+          ...B,
+          startOfMonth
+        ).then((r) => r[0]),
         // Last month (for % change)
-        donationModel.aggregate([
-          { $match: { ...completedBase, createdAt: { $gte: startOfLastMonth, $lte: endOfLastMonth } } },
-          { $group: { _id: null, total: { $sum: "$amount" } } },
-        ]),
+        prisma.$queryRawUnsafe(
+          `SELECT COALESCE(SUM("amount"), 0) AS total
+             FROM "donations" ${baseWhere.sql ? baseWhere.sql + " AND" : "WHERE"}
+                   "createdAt" >= $${B.length + 1} AND "createdAt" <= $${B.length + 2}`,
+          ...B,
+          startOfLastMonth,
+          endOfLastMonth
+        ).then((r) => r[0]),
         // Total transaction count (all statuses)
         donationModel.countDocuments(EXCLUDE_DONATIONS_PAGE),
-        // Unique donors — union of email + mobile
-        donationModel.aggregate([
-          { $match: completedBase },
-          {
-            $group: {
-              _id: {
-                $cond: [
-                  { $and: [{ $ne: ["$donorEmail", null] }, { $ne: ["$donorEmail", ""] }] },
-                  { $toLower: "$donorEmail" },
-                  { $ifNull: ["$donorMobile", "$$REMOVE"] },
-                ],
-              },
-            },
-          },
-          { $count: "count" },
-        ]),
+        // Unique donors. Faithful to the old pipeline: a row is keyed by its
+        // lowercased email when it has one, and only falls back to the mobile
+        // number when the email is missing -- so a donor who supplied both is
+        // counted ONCE. A plain UNION of email and mobile would double count
+        // them, which would inflate the donor total.
+        prisma.$queryRawUnsafe(
+          // baseWhere.sql already starts with "WHERE", so the extra
+          // per-branch conditions have to be appended with AND. Emitting a
+          // second WHERE produced `... WHERE "status" = $1 WHERE "donorEmail"
+          // IS NOT NULL`, a hard syntax error (42601) that took out the whole
+          // /donations/stats endpoint.
+          `SELECT COUNT(*)::int AS count FROM (
+             SELECT LOWER("donorEmail") AS k
+               FROM "donations" ${baseWhere.sql ? baseWhere.sql + " AND" : "WHERE"}
+                    "donorEmail" IS NOT NULL AND "donorEmail" <> ''
+             UNION
+             SELECT "donorMobile" AS k
+               FROM "donations" ${baseWhere.sql ? baseWhere.sql + " AND" : "WHERE"}
+                    ("donorEmail" IS NULL OR "donorEmail" = '')
+                    AND "donorMobile" IS NOT NULL
+           ) donors`,
+          // The same WHERE text appears twice above, referencing the same
+          // placeholders -- that is valid in Postgres, so the params are bound
+          // once, not twice.
+          ...B
+        ).then((r) => r[0]),
         // Monthly donations (last 12 months, completed)
-        donationModel.aggregate([
-          { $match: { ...completedBase, createdAt: { $gte: twelveMonthsAgo } } },
-          {
-            $group: {
-              _id: { year: { $year: "$createdAt" }, month: { $month: "$createdAt" } },
-              amount: { $sum: "$amount" },
-              count: { $sum: 1 },
-            },
-          },
-          { $sort: { "_id.year": 1, "_id.month": 1 } },
-        ]),
+        prisma.$queryRawUnsafe(
+          `SELECT EXTRACT(YEAR FROM "createdAt")::int AS year,
+                  EXTRACT(MONTH FROM "createdAt")::int AS month,
+                  COALESCE(SUM("amount"), 0) AS amount,
+                  COUNT(*)::int AS count
+             FROM "donations" ${baseWhere.sql ? baseWhere.sql + " AND" : "WHERE"} "createdAt" >= $${B.length + 1}
+            GROUP BY 1, 2
+            ORDER BY 1 ASC, 2 ASC`,
+          ...B,
+          twelveMonthsAgo
+        ),
         // Seva-wise split (completed)
-        donationModel.aggregate([
-          { $match: completedBase },
-          {
-            $group: {
-              _id: { $ifNull: [{ $ifNull: ["$sevaName", "$type"] }, "General"] },
-              value: { $sum: "$amount" },
-              count: { $sum: 1 },
-            },
-          },
-          { $sort: { value: -1 } },
-        ]),
+        prisma.$queryRawUnsafe(
+          `SELECT COALESCE(COALESCE("sevaName", "type"), 'General') AS name,
+                  COALESCE(SUM("amount"), 0) AS value,
+                  COUNT(*)::int AS count
+             FROM "donations" ${baseWhere.sql}
+            GROUP BY 1
+            ORDER BY value DESC`,
+          ...B
+        ),
         donationModel.countDocuments(needsAttentionFilter),
       ]);
 
-      const totalCollected = totalAgg[0]?.total || 0;
-      const totalCount = totalAgg[0]?.count || 0;
-      const thisMonthTotal = thisMonthAgg[0]?.total || 0;
-      const lastMonthTotal = lastMonthAgg[0]?.total || 0;
+      const totalCollected = totalRow?.total || 0;
+      const totalCount = totalRow?.count || 0;
+      const thisMonthTotal = thisMonthRow?.total || 0;
+      const lastMonthTotal = lastMonthRow?.total || 0;
       const changePct = lastMonthTotal
         ? Number((((thisMonthTotal - lastMonthTotal) / lastMonthTotal) * 100).toFixed(1))
         : null;
@@ -133,13 +161,13 @@ const donationController = {
       // Format monthly data with readable labels
       const monthNames = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
       const monthly = monthlyAgg.map((m) => ({
-        month: `${monthNames[m._id.month - 1]} ${m._id.year}`,
+        month: `${monthNames[m.month - 1]} ${m.year}`,
         amount: m.amount,
         count: m.count,
       }));
 
       const sevaWise = sevaAgg.map((s) => ({
-        name: s._id,
+        name: s.name,
         value: s.value,
         count: s.count,
       }));
@@ -340,46 +368,41 @@ const donationController = {
       const dateMatch = buildDateRangeMatch(from, to);
       const baseMatch = { ...EXCLUDE_DONATIONS_PAGE, status: "completed", ...dateMatch };
 
-      const stats = await donationModel.aggregate([
-        { $match: baseMatch },
-        {
-          $group: {
-            _id: {
-              campaign: { $ifNull: ["$utm.campaign", ""] },
-              source: { $ifNull: ["$utm.source", ""] },
-              medium: { $ifNull: ["$utm.medium", ""] },
-            },
-            totalAmount: { $sum: "$amount" },
-            count: { $sum: 1 },
-          },
-        },
-        {
-          $project: {
-            _id: {
-              campaign: { $cond: [{ $eq: ["$_id.campaign", ""] }, "direct", "$_id.campaign"] },
-              source: { $cond: [{ $eq: ["$_id.source", ""] }, "direct", "$_id.source"] },
-              medium: { $cond: [{ $eq: ["$_id.medium", ""] }, "none", "$_id.medium"] },
-            },
-            totalAmount: 1,
-            count: 1,
-          },
-        },
-        { $sort: { totalAmount: -1 } },
-      ]);
+      // The $group keyed on a composite _id, so the response nests the three
+      // values under _id; jsonb_build_object preserves that exact shape rather
+      // than forcing the client to change. It must be jsonb, not json: `json`
+      // has no equality operator in Postgres, so GROUP BY on a json expression
+      // fails with 42883 "could not identify an equality operator for type
+      // json". jsonb has both equality and ordering. Empty strings are relabelled
+      // "direct"/"direct"/"none" here, matching the original $project.
+      const utmWhere = buildWhere(baseMatch);
+      const stats = await prisma.$queryRawUnsafe(
+        `SELECT
+           jsonb_build_object(
+             'campaign', COALESCE(NULLIF("utm"->>'campaign', ''), 'direct'),
+             'source',   COALESCE(NULLIF("utm"->>'source',   ''), 'direct'),
+             'medium',   COALESCE(NULLIF("utm"->>'medium',   ''), 'none')
+           ) AS "_id",
+           COALESCE(SUM("amount"), 0) AS "totalAmount",
+           COUNT(*)::int AS "count"
+         FROM "donations" ${utmWhere.sql}
+         GROUP BY 1
+         ORDER BY "totalAmount" DESC`,
+        ...utmWhere.params
+      );
 
       // Also break down by sourcePage, since sitewide spans 9 different
       // origin flows (unlike the single-page /donations-admin equivalent).
-      const bySourcePage = await donationModel.aggregate([
-        { $match: baseMatch },
-        {
-          $group: {
-            _id: { $ifNull: ["$sourcePage", "unknown"] },
-            totalAmount: { $sum: "$amount" },
-            count: { $sum: 1 },
-          },
-        },
-        { $sort: { totalAmount: -1 } },
-      ]);
+      const bySourcePage = await prisma.$queryRawUnsafe(
+        `SELECT
+           COALESCE("sourcePage", 'unknown') AS "_id",
+           COALESCE(SUM("amount"), 0) AS "totalAmount",
+           COUNT(*)::int AS "count"
+         FROM "donations" ${utmWhere.sql}
+         GROUP BY 1
+         ORDER BY "totalAmount" DESC`,
+        ...utmWhere.params
+      );
 
       res.status(200).json({
         success: true,
@@ -483,7 +506,11 @@ const donationController = {
         manualEntryNote: manualEntryNote || undefined,
         manualEnteredBy: req.user?.userId || undefined,
         dccEnrolledById,
-        site: site || "vizag",
+        // This is the Kakinada install: a donation with no explicit site is a
+        // Kakinada donation. Defaulting to "vizag" here is a leftover from the
+        // Vizag codebase this was replicated from, and it silently mis-attributed
+        // every gift whose caller did not send `site` -- which is most of them.
+        site: site || "kakinada",
         panNumber: panNumber || undefined,
         certificate: !!certificate,
         wantPrasadam: !!wantPrasadam,
@@ -635,13 +662,23 @@ const donationController = {
         manualEntry: 1, utrNumber: 1, manualPaymentMode: 1, manualEntryNote: 1,
       };
 
-      const [total, donations, totalAmountAgg] = await Promise.all([
+      // The old pipeline was a whole-list $match + $group sum. Counting and
+      // finding still go through the compat layer, but the sum has to be SQL.
+      // buildWhere() handles the RegExp literals in `filter` (ILIKE) and the
+      // $or wrapping above.
+      const sumWhere = buildWhere(filter);
+      const [total, donations, totalAmountRow] = await Promise.all([
         donationModel.countDocuments(filter),
         donationModel.find(filter).sort({ createdAt: -1 }).skip(skip).limit(limit).select(projection).lean(),
-        donationModel.aggregate([{ $match: filter }, { $group: { _id: null, sum: { $sum: "$amount" } } }]),
+        prisma
+          .$queryRawUnsafe(
+            `SELECT COALESCE(SUM("amount"), 0) AS "sum" FROM "donations" ${sumWhere.sql}`,
+            ...sumWhere.params
+          )
+          .then((r) => r[0]),
       ]);
 
-      res.status(200).json({ donations, total, page, limit, totalAmount: totalAmountAgg[0]?.sum || 0 });
+      res.status(200).json({ donations, total, page, limit, totalAmount: (totalAmountRow && totalAmountRow.sum) || 0 });
     } catch (err) {
       console.error('donation list error', err);
       res.status(500).json({ message: "Server error" });
@@ -781,19 +818,27 @@ const donationController = {
   resendWhatsApp: async (req, res) => {
     try {
       const { id } = req.params;
-      const { isWhatsAppConfigured } = require("../services/whatsapp.service");
-      const { sendDonationWhatsAppReceipt } = require("../services/paymentCompletion.service");
+      const {
+        sendDonationWhatsAppReceipt,
+        isReceiptWhatsAppConfigured,
+      } = require("../services/paymentCompletion.service");
       const donation = await donationModel.findById(id);
       if (!donation) return res.status(404).json({ message: "Donation not found" });
 
-      if (!isWhatsAppConfigured()) {
+      // Checks whichever provider is actually selected. Testing WAPI_TOKEN
+      // here unconditionally made this button useless on a Gupshup server.
+      if (!isReceiptWhatsAppConfigured()) {
         return res.status(200).json({
-          message: "WAPI_TOKEN is not configured on this server, so WhatsApp isn't connected yet. Nothing was sent.",
+          message:
+            "No WhatsApp provider is configured on this server, so nothing was sent. " +
+            "Set the GUPSHUP_* variables (or WAPI_TOKEN if you are on Flaxxa).",
           skipped: true,
         });
       }
 
-      const result = await sendDonationWhatsAppReceipt(donation);
+      // force: an admin pressing Resend means it deliberately, so the
+      // already-sent guard does not apply.
+      const result = await sendDonationWhatsAppReceipt(donation, { force: true });
       if (result.ok) {
         return res.status(200).json({ message: "WhatsApp receipt sent successfully" });
       }

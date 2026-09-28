@@ -8,7 +8,12 @@ const heroBannerController = {
     try {
       const includeInactive = req.query.all === "true";
       const filter = includeInactive ? {} : { active: true };
-      const banners = await heroBannerModel.find(filter).sort({ order: 1, createdAt: 1 }).lean();
+      // The Prisma column is `sortOrder`; the admin UI reads and writes
+      // `order`. Sort by the real column, then echo it back under the name the
+      // client expects -- sorting by `order` asked Prisma for a field that does
+      // not exist and 500'd the public homepage carousel.
+      const rows = await heroBannerModel.find(filter).sort({ sortOrder: 1, createdAt: 1 }).lean();
+      const banners = rows.map((b) => ({ ...b, order: b.sortOrder }));
       res.status(200).json({ banners });
     } catch (err) {
       console.error("heroBanner.list error:", err);
@@ -51,7 +56,7 @@ const heroBannerController = {
         desktopImage,
         mobileImage,
         linkUrl: linkUrl ? String(linkUrl).trim() : "",
-        order: order !== undefined ? Number(order) : count,
+        sortOrder: order !== undefined ? Number(order) : count,
         createdBy: req.user ? req.user.userId : undefined,
       });
 
@@ -75,7 +80,7 @@ const heroBannerController = {
 
       const patch = {};
       if (req.body.title !== undefined) patch.title = req.body.title;
-      if (req.body.order !== undefined) patch.order = Number(req.body.order);
+      if (req.body.order !== undefined) patch.sortOrder = Number(req.body.order);
       if (req.body.active !== undefined) patch.active = req.body.active === "true" || req.body.active === true;
       if (req.body.linkUrl !== undefined) patch.linkUrl = String(req.body.linkUrl).trim();
 
@@ -116,7 +121,7 @@ const heroBannerController = {
       const { order } = req.body; // [{id, order}, ...]
       if (!Array.isArray(order)) return res.status(400).json({ message: "order must be an array" });
       await Promise.all(
-        order.map(({ id, order: pos }) => heroBannerModel.findByIdAndUpdate(id, { order: pos }))
+        order.map(({ id, order: pos }) => heroBannerModel.findByIdAndUpdate(id, { sortOrder: pos }))
       );
       res.status(200).json({ message: "Reordered" });
     } catch (err) {

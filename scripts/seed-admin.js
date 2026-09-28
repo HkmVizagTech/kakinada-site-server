@@ -3,9 +3,9 @@
 // Run once: node scripts/seed-admin.js
 // Safe to re-run — skips if the email already exists.
 //
-// Does NOT require npm install — parses .env manually and uses the
-// same mongoose already in node_modules when run from the server dir
-// after `npm install`. If node_modules is empty, run `npm install` first.
+// Parses .env manually and uses the generated Prisma client, so it works
+// from the server dir after `npm install` + `npx prisma generate`. If
+// node_modules is empty, run `npm install` first.
 
 const fs = require("fs");
 const path = require("path");
@@ -23,30 +23,13 @@ for (const line of envRaw.split("\n")) {
   if (!process.env[key]) process.env[key] = val;
 }
 
-const mongoose = require("mongoose");
+const { prisma } = require("../src/lib/prisma");
 const bcrypt = require("bcryptjs");
 
-const MONGODB_URI = process.env.MONGO_URI || process.env.MONGODB_URI;
-if (!MONGODB_URI) {
-  console.error("❌ MONGODB_URI is not set in .env");
+if (!process.env.DATABASE_URL) {
+  console.error("❌ DATABASE_URL is not set in .env");
   process.exit(1);
 }
-
-// ── Inline User schema ────────────────────────────────────────────
-const userSchema = new mongoose.Schema(
-  {
-    name: String,
-    email: { type: String, unique: true },
-    password: String,
-    role: {
-      type: String,
-      enum: ["user", "donations_admin", "blogs_admin", "admin"],
-      default: "user",
-    },
-  },
-  { timestamps: true }
-);
-const User = mongoose.model("User", userSchema);
 
 // Credentials come from .env / environment — never hardcoded, so the
 // script can't accidentally ship a public admin password.
@@ -60,29 +43,28 @@ if (!EMAIL || !PASSWORD) {
 }
 
 async function main() {
-  console.log("Connecting to MongoDB…");
-  await mongoose.connect(MONGODB_URI, {
-    serverSelectionTimeoutMS: 10000,
-    connectTimeoutMS: 10000,
-  });
+  console.log("Connecting to PostgreSQL…");
+  await prisma.$queryRaw`SELECT 1`;
   console.log("Connected ✓");
 
-  const existing = await User.findOne({ email: EMAIL });
+  const existing = await prisma.user.findUnique({ where: { email: EMAIL } });
   if (existing) {
     console.log(`⚠️  Admin "${EMAIL}" already exists (role: ${existing.role}). Skipping.`);
-    await mongoose.disconnect();
+    await prisma.$disconnect();
     process.exit(0);
   }
 
   const hash = await bcrypt.hash(PASSWORD, 10);
-  const user = await User.create({ name: NAME, email: EMAIL, password: hash, role: "admin" });
+  const user = await prisma.user.create({
+    data: { name: NAME, email: EMAIL, password: hash, role: "admin" },
+  });
 
   console.log(`✅ Admin created!`);
   console.log(`   Email:    ${EMAIL}`);
   console.log(`   Role:     ${user.role}`);
-  console.log(`   ID:       ${user._id}`);
+  console.log(`   ID:       ${user.id}`);
 
-  await mongoose.disconnect();
+  await prisma.$disconnect();
   process.exit(0);
 }
 

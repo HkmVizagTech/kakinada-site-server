@@ -3,7 +3,7 @@ const cors = require("cors");
 const cookieParser = require("cookie-parser");
 const compression = require("compression");
 const helmet = require("helmet");
-const mongoose = require('mongoose');
+const { prisma } = require("./src/lib/prisma");
 
 
 const { userRouter } = require("./src/routes/user.routes");
@@ -26,11 +26,28 @@ const { volunteerRouter } = require("./src/routes/volunteer.routes");
 const { blogProxyRouter } = require("./src/routes/blogProxy.routes");
 const app = express();
 
+// Railway terminates TLS at its edge proxy and forwards the real client address
+// in X-Forwarded-For. Without this, req.ip is the proxy's own address, and
+// express-rate-limit refuses to run at all (ERR_ERL_UNEXPECTED_X_FORWARDED_FOR)
+// -- which means the login brute-force limiter in user.routes.js was throwing on
+// every request instead of protecting anything.
+//
+// `1` trusts exactly one hop, the Railway proxy. `true` would trust the whole
+// chain, letting any client spoof X-Forwarded-For and get a fresh rate-limit
+// bucket per forged IP -- i.e. no brute-force protection at all.
+app.set("trust proxy", 1);
+
+// Origins allowed to call this API.
+//
+// FRONTEND_URL is the real switch — set it to the public client URL on Railway
+// and production origins are picked up from it. `*.vercel.app` is matched
+// separately below so Vercel preview deploys keep working without a redeploy
+// per branch.
+//
+// The apex + www pair is listed explicitly: browsers send the exact origin in
+// the header, so allowing only one of the two will CORS-block the other.
 const allowedOrigins = new Set([
   process.env.FRONTEND_URL,
-  'https://hkmsite2-0-client-9fyg.vercel.app',
-  'https://harekrishnavizag.org',
-  'https://www.harekrishnavizag.org',
   'https://iskconkakinada.org',
   'https://www.iskconkakinada.org',
   'http://localhost:3000',
@@ -47,7 +64,6 @@ app.use(
       try {
         const hostname = new URL(origin).hostname;
         if (hostname.endsWith('.vercel.app')) return callback(null, true);
-        if (hostname === 'harekrishnavizag.org' || hostname.endsWith('.harekrishnavizag.org')) return callback(null, true);
         if (hostname === 'iskconkakinada.org' || hostname.endsWith('.iskconkakinada.org')) return callback(null, true);
       } catch (e) {
 
@@ -118,14 +134,42 @@ app.use("/festival-donations", festivalDonationRouter);
 app.use("/volunteers", volunteerRouter);
 app.use("/blogs-proxy", blogProxyRouter);
 
+// Gupshup's delivery callback. Mounted with its own body parser inside the
+// router because Gupshup posts JSON on some events and form-encoded on others.
+// The shared secret is in the PATH, not a header: self-serve Gupshup callbacks
+// carry no signature and no custom headers.
+app.use("/webhooks/whatsapp", require("./src/routes/whatsappWebhook.routes").whatsappWebhookRouter);
+
+// Lets an external cron drive the pending-reminder job instead of (or as well
+// as) the in-process scheduler in index.js. Guarded by a shared secret because
+// it triggers outbound messages.
+app.get("/api/internal/send-pending-reminders", async (req, res) => {
+  const secret = process.env.INTERNAL_SECRET;
+  if (!secret || req.headers["x-internal-secret"] !== secret) {
+    return res.status(401).json({ error: "Unauthorized" });
+  }
+  try {
+    const { runPendingReminders } = require("./src/services/pendingReminder.service");
+    const result = await runPendingReminders();
+    return res.json({ success: true, ...result });
+  } catch (err) {
+    console.error("send-pending-reminders failed:", err);
+    return res.status(500).json({ error: err && err.message ? err.message : "failed" });
+  }
+});
+
 // dev routes removed for production safety
 
 
-app.get('/health', (req, res) => {
-  const states = ['disconnected', 'connected', 'connecting', 'disconnecting'];
-  const dbState = mongoose && mongoose.connection ? mongoose.connection.readyState : 0;
-  const ok = dbState === 1;
-  res.status(ok ? 200 : 503).json({ server: 'ok', db: { state: states[dbState] || dbState } });
+app.get('/health', async (req, res) => {
+  // Mongoose exposed a numeric connection.readyState; Prisma has no equivalent,
+  // so actually round-trip the database. A 200 here means Postgres answered.
+  try {
+    await prisma.$queryRaw`SELECT 1`;
+    res.status(200).json({ server: 'ok', db: { state: 'connected' } });
+  } catch (err) {
+    res.status(503).json({ server: 'ok', db: { state: 'disconnected' } });
+  }
 });
 
 module.exports = { app };

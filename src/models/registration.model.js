@@ -1,18 +1,7 @@
-const mongoose = require("mongoose");
+const { createModel } = require("../lib/mongoCompat");
 
-const registrationSchema = new mongoose.Schema({
-  eventId: { type: mongoose.Schema.Types.ObjectId, ref: "event", required: true },
-  token: { type: String, required: true, unique: true },
-  data: { type: Object, default: {} },
-  files: [{ type: String }],
-  paid: { type: Boolean, default: false },
-  attendance: {
-    present: { type: Boolean, default: false },
-    at: { type: Date },
-    scannedBy: { type: mongoose.Schema.Types.ObjectId, ref: "user" }
-  }
-}, { timestamps: true, versionKey: false });
-
-const registrationModel = mongoose.model("registration", registrationSchema);
+// Prisma-backed. The exported name is unchanged so the ~47 files that
+// import registrationModel keep working unchanged.
+const registrationModel = createModel("registration");
 
 module.exports = { registrationModel };

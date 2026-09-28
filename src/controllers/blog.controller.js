@@ -1,6 +1,27 @@
-const { blogModel, BLOG_CATEGORIES } = require("../models/blog.model");
+const {
+  blogModel,
+  BLOG_CATEGORIES,
+  toCategoryEnum,
+  toCategoryLabel,
+  withCategoryLabel,
+} = require("../models/blog.model");
+const { prisma } = require("../lib/prisma");
 const { uploadToR2 } = require("../utils/r2");
 const fs = require("fs");
+
+// Published-post counts per category. Was a Mongo $match/$group pipeline; the
+// native Prisma groupBy returns the same shape without raw SQL.
+const publishedCategoryCounts = async () => {
+  const rows = await prisma.blog.groupBy({
+    by: ["category"],
+    where: { status: "published" },
+    _count: { _all: true },
+  });
+  // groupBy keys are Prisma member names (KrishnaKatha); the callers look
+  // counts up by stored label ("Krishna Katha"), so re-key here. Without this
+  // every category tile rendered a count of 0.
+  return Object.fromEntries(rows.map((r) => [toCategoryLabel(r.category), r._count._all]));
+};
 
 const slugify = (s) =>
   String(s || "")
@@ -57,7 +78,7 @@ const blogController = {
       const filter = {};
       if (status && status !== "all") filter.status = status;
       else if (!status) filter.status = "published";
-      if (category) filter.category = category;
+      if (category) filter.category = toCategoryEnum(category);
       if (tag) filter.tags = tag;
       if (featured === "true") filter.featured = true;
       if (q) filter.$text = { $search: q };
@@ -78,7 +99,7 @@ const blogController = {
       ]);
 
       res.status(200).json({
-        blogs,
+        blogs: withCategoryLabel(blogs),
         page: pageNum,
         limit: lim,
         total,
@@ -113,13 +134,9 @@ const blogController = {
         .select("-content")
         .lean();
 
-      // Category counts for the "Get Started Here" 13-tile grid
-      const counts = await blogModel.aggregate([
-        { $match: base },
-        { $group: { _id: "$category", count: { $sum: 1 } } },
-      ]);
-      const countMap = Object.fromEntries(counts.map((c) => [c._id, c.count]));
-      const categories = BLOG_CATEGORIES.map((name) => ({
+        // Category counts for the "Get Started Here" 13-tile grid
+        const countMap = await publishedCategoryCounts();
+        const categories = BLOG_CATEGORIES.map((name) => ({
         name,
         slug: slugify(name),
         count: countMap[name] || 0,
@@ -130,12 +147,12 @@ const blogController = {
       const byCategory = await Promise.all(
         populatedCategories.map(async (cat) => {
           const items = await blogModel
-            .find({ ...base, category: cat.name })
+            .find({ ...base, category: toCategoryEnum(cat.name) })
             .sort({ publishedAt: -1 })
             .limit(6)
             .select("-content")
             .lean();
-          return { ...cat, items };
+          return { ...cat, items: withCategoryLabel(items) };
         })
       );
 
@@ -166,12 +183,12 @@ const blogController = {
         .lean();
 
       res.status(200).json({
-        recents,
-        devotional,
+        recents: withCategoryLabel(recents),
+        devotional: withCategoryLabel(devotional),
         categories,
         byCategory,
-        popular,
-        recent,
+        popular: withCategoryLabel(popular),
+        recent: withCategoryLabel(recent),
       });
     } catch (err) {
       console.error("Blog landing error:", err);
@@ -182,11 +199,7 @@ const blogController = {
   // PUBLIC - list of categories with counts (for category navigation)
   categories: async (req, res) => {
     try {
-      const counts = await blogModel.aggregate([
-        { $match: { status: "published" } },
-        { $group: { _id: "$category", count: { $sum: 1 } } },
-      ]);
-      const countMap = Object.fromEntries(counts.map((c) => [c._id, c.count]));
+      const countMap = await publishedCategoryCounts();
       const categories = BLOG_CATEGORIES.map((name) => ({
         name,
         slug: slugify(name),
@@ -202,15 +215,17 @@ const blogController = {
   get: async (req, res) => {
     try {
       const { idOrSlug } = req.params;
-      const isObjectId = /^[a-f\d]{24}$/i.test(idOrSlug);
-      const query = isObjectId ? { _id: idOrSlug } : { slug: idOrSlug };
-      const blog = await blogModel.findOne(query);
+      // Ids are cuids, not 24-hex ObjectIds, so the old "does this look like an
+      // ObjectId" test would send every admin id lookup down the slug branch and
+      // 404. The admin UI fetches by _id while the public pages use the slug, so
+      // match either.
+      const blog = await blogModel.findOne({ $or: [{ id: idOrSlug }, { slug: idOrSlug }] });
       if (!blog) return res.status(404).json({ message: "Blog not found" });
       if (blog.status !== "published" && req.query.preview !== "1") {
         return res.status(404).json({ message: "Blog not found" });
       }
       blogModel.updateOne({ _id: blog._id }, { $inc: { views: 1 } }).catch(() => {});
-      res.status(200).json({ blog });
+      res.status(200).json({ blog: withCategoryLabel(blog) });
     } catch (err) {
       console.error("Blog get error:", err);
       res.status(500).json({ message: "Server error", error: err.message });
@@ -224,12 +239,12 @@ const blogController = {
       const current = await blogModel.findById(id).select("category").lean();
       if (!current) return res.status(404).json({ message: "Blog not found" });
       const items = await blogModel
-        .find({ _id: { $ne: id }, status: "published", category: current.category })
+        .find({ _id: { $ne: id }, status: "published", category: toCategoryEnum(current.category) })
         .sort({ publishedAt: -1 })
         .limit(5)
         .select("-content")
         .lean();
-      res.status(200).json({ items });
+      res.status(200).json({ items: withCategoryLabel(items) });
     } catch (err) {
       res.status(500).json({ message: "Server error" });
     }
@@ -266,7 +281,7 @@ const blogController = {
         content,
         coverImage,
         images: extraImages,
-        category: category || "Spiritual Knowledge",
+        category: toCategoryEnum(category || "Spiritual Knowledge"),
         tags: parseTags(req.body.tags),
         author,
         status: status || "draft",
@@ -275,7 +290,7 @@ const blogController = {
         metaDescription: metaDescription || excerpt || "",
         createdBy: req.user ? req.user.userId : undefined,
       });
-      res.status(201).json({ message: "Blog created", blog });
+      res.status(201).json({ message: "Blog created", blog: withCategoryLabel(blog) });
     } catch (err) {
       console.error("Blog create error:", err);
       res.status(500).json({ message: "Server error", error: err.message });
@@ -308,7 +323,7 @@ const blogController = {
         title: req.body.title ?? existing.title,
         excerpt: req.body.excerpt ?? existing.excerpt,
         content: req.body.content ?? existing.content,
-        category: req.body.category ?? existing.category,
+        category: toCategoryEnum(req.body.category ?? existing.category),
         author,
         status: req.body.status ?? existing.status,
         metaTitle: req.body.metaTitle ?? existing.metaTitle,
@@ -329,7 +344,7 @@ const blogController = {
       Object.assign(existing, patch);
       await existing.save();
 
-      res.status(200).json({ message: "Blog updated", blog: existing });
+      res.status(200).json({ message: "Blog updated", blog: withCategoryLabel(existing) });
     } catch (err) {
       console.error("Blog update error:", err);
       res.status(500).json({ message: "Server error", error: err.message });
@@ -376,7 +391,7 @@ const blogController = {
         .sort({ deletionRequestedAt: -1 })
         .populate("deletionRequestedBy", "name email")
         .select("title slug category coverImage deletionRequestedBy deletionRequestedAt");
-      res.status(200).json({ blogs });
+      res.status(200).json({ blogs: withCategoryLabel(blogs) });
     } catch (err) {
       res.status(500).json({ message: "Server error", error: err.message });
     }
@@ -405,7 +420,7 @@ const blogController = {
         { new: true }
       );
       if (!blog) return res.status(404).json({ message: "Blog not found" });
-      res.status(200).json({ message: "Deletion request rejected — post kept", blog });
+      res.status(200).json({ message: "Deletion request rejected — post kept", blog: withCategoryLabel(blog) });
     } catch (err) {
       res.status(500).json({ message: "Server error", error: err.message });
     }

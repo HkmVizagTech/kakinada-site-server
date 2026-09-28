@@ -11,7 +11,11 @@
 //   META_PIXEL_ID           - the Pixel/dataset ID (same as the browser pixel)
 //   META_CAPI_ACCESS_TOKEN  - a Conversions API access token from Events Manager
 //   META_TEST_EVENT_CODE    - (optional) shows events in the Test Events tab
+//   FRONTEND_URL            - public origin of the site, used to build event_source_url
 //
+
+// Trailing slashes stripped so `${SITE_ORIGIN}/donate` never doubles up.
+const SITE_ORIGIN = (process.env.FRONTEND_URL || "http://localhost:3000").replace(/\/+$/, "");
 // If the token or pixel id isn't set, this is a no-op — donations still
 // complete normally, we just don't report to Meta.
 
@@ -89,9 +93,12 @@ async function sendPurchaseEvent(donation) {
           event_name: "Purchase",
           event_time: Math.floor(Date.now() / 1000),
           event_id: eventId, // must match the browser pixel event for dedup
+          // Derived from FRONTEND_URL so Meta attributes the conversion to
+          // whichever domain the donor actually converted on. Hardcoding a
+          // host here silently mis-reports every donation's source URL.
           event_source_url: donation.sourcePage
-            ? `https://www.harekrishnavizag.org${donation.sourcePage.startsWith("/") ? "" : "/"}${donation.sourcePage}`
-            : "https://www.harekrishnavizag.org",
+            ? `${SITE_ORIGIN}${donation.sourcePage.startsWith("/") ? "" : "/"}${donation.sourcePage}`
+            : SITE_ORIGIN,
           action_source: "website",
           user_data: userData,
           custom_data: {

@@ -205,7 +205,11 @@ const paymentController = {
         legacySevaId,
         message: message || undefined,
         paymentAccount: account.name,
-        site: site || "vizag",
+        // This is the Kakinada install: a donation with no explicit site is a
+        // Kakinada donation. Defaulting to "vizag" here is a leftover from the
+        // Vizag codebase this was replicated from, and it silently mis-attributed
+        // every gift whose caller did not send `site` -- which is most of them.
+        site: site || "kakinada",
         panNumber: panNumber || req.body.panNumber,
         certificate: certificate || req.body.certificate,
         sevakName: sevakName || req.body.sevakName || undefined,
@@ -347,7 +351,11 @@ const paymentController = {
         panNumber: panNumber || req.body.panNumber,
         certificate: certificate || req.body.certificate,
         subscriptionId: subscription.id,
-        site: site || "vizag",
+        // This is the Kakinada install: a donation with no explicit site is a
+        // Kakinada donation. Defaulting to "vizag" here is a leftover from the
+        // Vizag codebase this was replicated from, and it silently mis-attributed
+        // every gift whose caller did not send `site` -- which is most of them.
+        site: site || "kakinada",
         isRecurring: true,
         status: 'pending',
         campaignerSlug: req.body.campaignerSlug || undefined,

@@ -1,0 +1,643 @@
+// Prisma schema for ISKCON Kakinada — PostgreSQL
+//
+// Ported from the 17 Mongoose models. Decisions worth knowing:
+//
+//  * Ids are `String @id @default(cuid())` rather than Postgres UUIDs. The
+//    existing controllers treat ids as opaque strings and several of them
+//    build Mongo-style 24-char ObjectId filters, so text ids are the
+//    lowest-risk target for a behavioural port.
+//  * Money and DCC numeric ids are `Float`, matching the JS Numbers the
+//    controllers already do arithmetic on. Converting to `Decimal` is the
+//    correct long-term move but would require touching every money path.
+//  * Sub-documents that Mongoose stored inline become `Json` (jsonb) so the
+//    existing read-modify-write code keeps working unchanged. The reporting
+//    queries that filter on these fields are the ones to revisit first.
+//  * Mongoose's `timestamps: true` becomes `createdAt` + `@updatedAt`.
+//
+// Railway injects DATABASE_URL into the API service automatically when the
+// Postgres plugin is attached; nothing here should hardcode a host.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ── Enums ──────────────────────────────────────────────────────────────────
+
+enum BlogStatus {
+  draft
+  published
+}
+
+enum BlogCategory {
+  KrishnaKatha                        @map("Krishna Katha")
+  VaishnavaSongsAndPrayers            @map("Vaishnava Songs and Prayers")
+  OurAcharyas                         @map("Our Acharyas")
+  SpiritualKnowledge                  @map("Spiritual Knowledge")
+  SacredFestivalsAndOccasions         @map("Sacred Festivals & Occasions")
+  SpiritualNewsAndEvents              @map("Spiritual News & Events")
+  SpiritualCharity                    @map("Spiritual Charity")
+  TimelessWisdom                      @map("Timeless Wisdom")
+  DivinePoetics                       @map("Divine Poetics")
+  KrishnaConsciousness                @map("Krishna Consciousness")
+  Recipes
+  Pilgrimage
+  Other
+}
+
+enum UserRole {
+  user
+  donations_admin
+  blogs_admin
+  admin
+}
+
+enum UserStatus {
+  active
+  inactive
+}
+
+enum ContactStatus {
+  new
+  read
+  responded
+}
+
+enum DonationStatus {
+  pending
+  active
+  completed
+  failed
+  cancelled
+}
+
+// "vizag" is retained for rows imported from the shared HKM cluster; new
+// Kakinada donations are always written as "kakinada".
+enum DonationSite {
+  vizag
+  kakinada
+}
+
+enum ManualPaymentMode {
+  upi
+  bank
+  cash
+  cheque
+}
+
+enum DccSyncStatus {
+  pending
+  syncing
+  synced
+  failed
+}
+
+enum CampaignerStatus {
+  active
+  inactive
+  closed
+}
+
+enum EventStatus {
+  upcoming
+  completed
+  cancelled
+}
+
+enum GalleryType {
+  darshan
+  festival
+  seva
+  community
+  other
+}
+
+enum GalleryStatus {
+  active
+  inactive
+}
+
+enum ImportantDateType {
+  Ekadashi
+  Festival
+  Other
+}
+
+enum TempleDevoteeStatus {
+  active
+  hidden
+}
+
+enum VolunteerCategory {
+  festival
+  weekly
+  special
+  outreach
+}
+
+enum VolunteerEventStatus {
+  active
+  closed
+  completed
+}
+
+enum VolunteerRegistrationStatus {
+  pending
+  approved
+  rejected
+  completed
+}
+
+// ── Models ─────────────────────────────────────────────────────────────────
+
+model User {
+  id        String     @id @default(cuid())
+  name      String
+  email     String     @unique
+  password  String
+  role      UserRole   @default(user)
+  status    UserStatus @default(active)
+  /// Mongoose stored this inline; kept as jsonb so user.controller.js's
+  /// spread/merge of preferences keeps working.
+  preferences Json      @default("{}")
+  createdAt DateTime   @default(now())
+  updatedAt DateTime   @updatedAt
+
+  blogsCreated        Blog[]                @relation("BlogCreatedBy")
+  blogsDeletionReq    Blog[]                @relation("BlogDeletionRequestedBy")
+  campaignsCreated    Campaigner[]
+  donationsCreated    Donation[]            @relation("DonationCreatedBy")
+  donationsEnteredMan Donation[]            @relation("DonationManualEnteredBy")
+  donationPageUpdates DonationPage[]
+  eventsCreated       Event[]
+  festivalsCreated    FestivalDonation[]
+  galleriesCreated    Gallery[]
+  heroBannersCreated  HeroBanner[]
+  importantDatesMade  ImportantDate[]
+  mediaUploaded       Media[]
+  siteContentUpdates  SiteContent[]
+  volunteerEventsMade VolunteerEvent[]
+
+  @@index([role])
+  @@map("users")
+}
+
+model Blog {
+  id        String       @id @default(cuid())
+  title     String
+  slug      String       @unique
+  excerpt   String       @default("")
+  content   String
+  coverImage String      @default("")
+  images    String[]     @default([])
+  category  BlogCategory @default(SpiritualKnowledge)
+  tags      String[]     @default([])
+  /// Mongoose embedded doc: { name, avatar, bio, slug }
+  author    Json         @default("{}")
+  status    BlogStatus   @default(draft)
+  publishedAt DateTime?
+  readTime  Int          @default(0)
+  views     Int          @default(0)
+  featured  Boolean      @default(false)
+
+  // A blogs_admin cannot delete a post outright; they raise a request and an
+  // actual admin approves or rejects it.
+  deletionRequested   Boolean   @default(false)
+  deletionRequestedBy String?
+  deletionRequester   User?     @relation("BlogDeletionRequestedBy", fields: [deletionRequestedBy], references: [id])
+  deletionRequestedAt DateTime?
+
+  metaTitle       String @default("")
+  metaDescription String @default("")
+
+  createdBy String?
+  creator   User?   @relation("BlogCreatedBy", fields: [createdBy], references: [id])
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([status, publishedAt])
+  @@index([category, status, publishedAt])
+  @@index([deletionRequested])
+  @@index([featured])
+  @@map("blogs")
+}
+
+model Campaigner {
+  id                 String           @id @default(cuid())
+  name               String
+  slug               String           @unique
+  status             CampaignerStatus @default(active)
+  referredByDevotee  String?
+  referrer           TempleDevotee?   @relation(fields: [referredByDevotee], references: [id])
+  createdBy          String?
+  creator            User?            @relation(fields: [createdBy], references: [id])
+  createdAt          DateTime         @default(now())
+  updatedAt          DateTime         @updatedAt
+
+  @@index([status])
+  @@map("campaigners")
+}
+
+model TempleDevotee {
+  id              String              @id @default(cuid())
+  name            String
+  /// DCC "enrolledBy" numeric id. Null means "fall back to env defaults".
+  dccEnrolledById Float?
+  status          TempleDevoteeStatus @default(active)
+  createdAt       DateTime            @default(now())
+  updatedAt       DateTime            @updatedAt
+
+  campaigners Campaigner[]
+
+  @@index([status])
+  @@map("temple_devotees")
+}
+
+model ContactMessage {
+  id            String        @id @default(cuid())
+  name          String
+  email         String
+  phone         String        @default("")
+  subject       String        @default("General Enquiry")
+  message       String
+  authorization Boolean       @default(false)
+  status        ContactStatus @default(new)
+  source        String        @default("contact-page")
+  createdAt     DateTime      @default(now())
+  updatedAt     DateTime      @updatedAt
+
+  @@index([status, createdAt])
+  @@map("contact_messages")
+}
+
+model FestivalDonation {
+  id          String  @id @default(cuid())
+  title       String
+  slug        String  @unique
+  description String?
+  images      String[] @default([])
+  active      Boolean  @default(true)
+  /// Mongoose array of sub-docs: [{ label, amount, description }]
+  donationOptions Json @default("[]")
+  eventId     String?
+  event       Event?  @relation(fields: [eventId], references: [id])
+  /// Mongoose Object (UTM, SEO, ...) -> jsonb
+  meta        Json    @default("{}")
+  createdBy   String?
+  creator     User?   @relation(fields: [createdBy], references: [id])
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  donations  Donation[]
+
+  @@index([active])
+  @@map("festival_donations")
+}
+
+model Donation {
+  id          String  @id @default(cuid())
+  donorName   String
+  donorEmail  String?
+  donorMobile String?
+  amount      Float
+  date        DateTime @default(now())
+  /// e.g. "Anna Daan", "Seva"
+  type        String  @default("General")
+  status      DonationStatus @default(pending)
+  message     String?
+  sourcePage  String?
+  /// Which temple's donation page the gift was made through.
+  /// Defaults to kakinada because this database is a clean Kakinada install
+  /// with no Vizag history to import.
+  site        DonationSite  @default(kakinada)
+  sevaName    String?
+  legacySevaId Float?
+  paymentAccount String?
+  transactionId  String?
+
+  festivalId   String?
+  festival     FestivalDonation? @relation(fields: [festivalId], references: [id])
+  festivalSlug String?
+  /// P2P campaign attribution (SQFT, Janmashtami, ...)
+  campaignerSlug String?
+
+  /// Snapshot of the DCC enrolledBy id for the devotee this donation is
+  /// attributed to, captured at order-creation time.
+  dccEnrolledById Float?
+
+  /// Mongoose embedded doc: { source, medium, campaign, content, term }
+  utm Json @default("{}")
+
+  panNumber     String?
+  certificate   Boolean @default(false)
+  sevakName     String?
+  sevaDate      String?
+  dob           String?
+  wantPrasadam  Boolean @default(false)
+  /// Mongoose embedded address doc
+  prasadamAddress Json  @default("{}")
+
+  razorpayOrderId   String?
+  razorpayPaymentId String?
+
+  /// Manual entry: donations that arrived outside the checkout flow
+  /// (direct bank transfer, temple VPA, cash/cheque) or stuck on-site
+  /// attempts where the donor paid but could not complete checkout.
+  manualEntry       Boolean @default(false)
+  utrNumber         String?
+  manualPaymentMode ManualPaymentMode?
+  manualEntryNote   String?
+  manualEnteredBy   String?
+  manualEnterer     User?     @relation("DonationManualEnteredBy", fields: [manualEnteredBy], references: [id])
+
+  subscriptionId  String?
+  isRecurring     Boolean   @default(false)
+  lastPaymentDate DateTime?
+  receiptNumber   String?
+  receiptGeneratedAt DateTime?
+
+  dccSyncStatus      DccSyncStatus @default(pending)
+  /// Without this, oldest-first reconcile batches would re-check the same
+  /// already-confirmed-abandoned records forever instead of progressing.
+  lastReconcileCheckAt DateTime?
+  dccSyncedAt        DateTime?
+  dccLastAttemptAt   DateTime?
+  dccSyncError       String?
+  dccPayload         Json?
+  dccResponse        Json?
+
+  whatsappReceiptSentAt DateTime?
+  whatsappReceiptError  String?
+  /// Provider message id for the last WhatsApp we sent about this donation.
+  /// The Gupshup delivery callback joins back on this, so it is indexed.
+  whatsappMessageId     String?
+  /// Last delivery state the provider reported: sent / delivered / read /
+  /// failed. Advances only forward, so a late "sent" cannot overwrite "read".
+  whatsappDeliveryStatus String?
+  whatsappDeliveredAt    DateTime?
+  /// Pending-transaction reminder bookkeeping. `Sent` is set ONLY after a
+  /// provider confirms the send, so a failed attempt is retried; `Attempts`
+  /// caps the retries so a permanently-unsendable record cannot crowd newer
+  /// donations out of the oldest-first batch forever.
+  whatsappPendingReminderSent     Boolean  @default(false)
+  whatsappPendingReminderAttempts Int      @default(0)
+  whatsappPendingReminderError    String?
+
+  // Captured at order-creation from the browser so the server-side Purchase
+  // event can be deduplicated against the browser pixel event (same
+  // metaEventId) and attributed to the right ad click (fbc/fbp).
+  metaEventId        String?
+  metaFbp            String?
+  metaFbc            String?
+  metaClientIp       String?
+  metaUserAgent      String?
+  metaPurchaseSentAt DateTime?
+
+  createdBy String?
+  creator   User?   @relation("DonationCreatedBy", fields: [createdBy], references: [id])
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([date])
+  @@index([status])
+  @@index([site])
+  @@index([razorpayOrderId])
+  @@index([donorMobile])
+  @@index([utrNumber])
+  @@index([campaignerSlug])
+  @@index([festivalId])
+  @@index([dccSyncStatus])
+  @@index([whatsappMessageId])
+  @@index([whatsappPendingReminderSent, createdAt])
+  @@map("donations")
+}
+
+model Plan {
+  id      String @id @default(cuid())
+  amount  Float
+  account String @default("default")
+  planId  String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Caches Razorpay Plan ids so the same amount on the same account reuses
+  // one plan instead of creating a new one per subscription.
+  @@unique([amount, account], map: "plan_amount_account_key")
+  @@map("plans")
+}
+
+model DonationPage {
+  id        String  @id @default(cuid())
+  key       String  @unique @default("donations")
+  heroTitle String?
+  heroSubtitle String?
+  heroEyebrow  String?
+  bannerImage       String?
+  bannerMobileImage String?
+  trusteeBannerImage String?
+  annadaanImage String?
+  goSevaImage   String?
+  annadaanTitle       String?
+  annadaanDescription String?
+  goSevaTitle         String?
+  goSevaDescription   String?
+  /// Mongoose array of sub-docs: [{ id, category, title, amount }]
+  donationOptions Json    @default("[]")
+  galleryImages String[] @default([])
+  /// Mongoose array of sub-docs: [{ title, text }]
+  impactItems Json      @default("[]")
+  /// Mongoose embedded doc: { beneficiaryName, bankName, accountNumber, ifsc }
+  bankDetails Json      @default("{}")
+  /// Mongoose embedded doc: { phone, email, note }
+  contact     Json      @default("{}")
+  updatedBy   String?
+  updater     User?     @relation(fields: [updatedBy], references: [id])
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  @@map("donation_pages")
+}
+
+model Event {
+  id          String      @id @default(cuid())
+  title       String
+  description String
+  date        DateTime
+  images      String[]    @default([])
+  /// Mongoose Object (per-event registration form definition) -> jsonb
+  registrationForm Json    @default("{}")
+  category    String      @default("General")
+  status      EventStatus @default(upcoming)
+  createdBy   String?
+  creator     User?       @relation(fields: [createdBy], references: [id])
+  createdAt   DateTime    @default(now())
+  updatedAt   DateTime    @updatedAt
+
+  festivals      FestivalDonation[]
+  registrations  Registration[]
+
+  @@index([status, date])
+  @@map("events")
+}
+
+model Registration {
+  id      String  @id @default(cuid())
+  eventId String
+  event   Event   @relation(fields: [eventId], references: [id])
+  token   String  @unique
+  /// Mongoose Object of arbitrary form values -> jsonb
+  data    Json    @default("{}")
+  files   String[] @default([])
+  paid    Boolean  @default(false)
+  /// Mongoose embedded doc: { present, at, scannedBy }. `scannedBy` stays an
+  /// unvalidated string inside jsonb rather than a real FK.
+  attendance Json   @default("{}")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([eventId])
+  @@map("registrations")
+}
+
+model Gallery {
+  id          String        @id @default(cuid())
+  title       String
+  description String?
+  images      String[]
+  date        DateTime
+  category    String        @default("General")
+  type        GalleryType   @default(darshan)
+  status      GalleryStatus @default(active)
+  createdBy   String?
+  creator     User?         @relation(fields: [createdBy], references: [id])
+  createdAt   DateTime      @default(now())
+  updatedAt   DateTime      @updatedAt
+
+  @@index([type, status])
+  @@map("galleries")
+}
+
+model HeroBanner {
+  id          String  @id @default(cuid())
+  title       String
+  desktopImage String
+  mobileImage String
+  linkUrl     String  @default("")
+  /// Reserved: "order" is a SQL keyword, mapped to the column sort_order.
+  sortOrder   Int     @default(0) @map("sort_order")
+  active      Boolean @default(true)
+  createdBy   String?
+  creator     User?   @relation(fields: [createdBy], references: [id])
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([active, sortOrder])
+  @@map("hero_banners")
+}
+
+model ImportantDate {
+  id          String            @id @default(cuid())
+  title       String
+  date        DateTime
+  description String?
+  type        ImportantDateType @default(Other)
+  createdBy   String?
+  creator     User?             @relation(fields: [createdBy], references: [id])
+  createdAt   DateTime          @default(now())
+  updatedAt   DateTime          @updatedAt
+
+  @@index([date])
+  @@map("important_dates")
+}
+
+model Media {
+  id          String  @id @default(cuid())
+  name        String
+  url         String
+  publicId    String
+  format      String?
+  width       Float?
+  height      Float?
+  bytes       Float?
+  folder      String  @default("media-library")
+  /// Free-text tags, e.g. "sqft campaign hero". Mongoose had a text index
+  /// on name+tags; Postgres needs a tsvector column or pg_trgm for that.
+  tags        String?
+  uploadedBy  String?
+  uploader    User?   @relation(fields: [uploadedBy], references: [id])
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([createdAt])
+  @@map("media")
+}
+
+model SiteContent {
+  id      String @id @default(cuid())
+  key     String @unique @default("main")
+  /// Mongoose embedded doc: { title, subtitle, tagline }
+  hero    Json   @default("{}")
+  /// Mongoose embedded doc: { heading, body }
+  about   Json   @default("{}")
+  /// Mongoose embedded doc: { phone, email, address, morningHours, eveningHours }
+  contact Json   @default("{}")
+  /// Mongoose embedded doc: { majorFestival, customLink: { enabled, label, href } }
+  /// siteContent.controller.update accepts and writes `navbar`, so without this
+  /// column every admin save that included the navbar block raised
+  /// "Unknown argument `navbar`" and answered 500.
+  navbar  Json   @default("{}")
+  updatedBy String?
+  updater   User?   @relation(fields: [updatedBy], references: [id])
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@map("site_contents")
+}
+
+model VolunteerEvent {
+  id          String              @id @default(cuid())
+  title       String
+  description String
+  date        DateTime
+  endDate     DateTime?
+  location    String              @default("")
+  image       String              @default("")
+  slots       Float               @default(0)
+  filledSlots Float               @default(0)
+  category    VolunteerCategory   @default(festival)
+  requirements String             @default("")
+  status      VolunteerEventStatus @default(active)
+  /// Mongoose array of sub-docs with _id:false:
+  /// [{ id, type, label, placeholder, required, options }]
+  formFields  Json                @default("[]")
+  createdBy   String?
+  creator     User?               @relation(fields: [createdBy], references: [id])
+  createdAt   DateTime            @default(now())
+  updatedAt   DateTime            @updatedAt
+
+  registrations VolunteerRegistration[]
+
+  @@index([status, date])
+  @@map("volunteer_events")
+}
+
+model VolunteerRegistration {
+  id         String                     @id @default(cuid())
+  eventId    String
+  event      VolunteerEvent             @relation(fields: [eventId], references: [id])
+  /// Mongoose Mixed: arbitrary form responses -> jsonb
+  responses  Json                       @default("{}")
+  status     VolunteerRegistrationStatus @default(pending)
+  createdAt  DateTime                   @default(now())
+  updatedAt  DateTime                   @updatedAt
+
+  @@index([eventId])
+  @@index([status])
+  @@map("volunteer_registrations")
+}

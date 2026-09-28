@@ -61,16 +61,28 @@ const defaultDonationPage = {
   },
 };
 
+// Postgres hands back EVERY column, so a field the admin never filled in
+// arrives as an explicit `null` -- whereas in Mongo that key was simply absent
+// from the document. A plain spread therefore let those nulls overwrite the
+// defaults below, and the /donations page lost its eyebrow, banner images and
+// Annadaan / Go Seva copy the moment any admin save created the row. Strip
+// null/undefined before merging so an unset column falls back to the default,
+// exactly as it did before the port.
+const defined = (obj) =>
+  Object.fromEntries(
+    Object.entries(obj || {}).filter(([, v]) => v !== null && v !== undefined)
+  );
+
 const mergeWithDefaults = (page) => ({
   ...defaultDonationPage,
-  ...(page || {}),
+  ...defined(page),
   bankDetails: {
     ...defaultDonationPage.bankDetails,
-    ...((page && page.bankDetails) || {}),
+    ...defined(page && page.bankDetails),
   },
   contact: {
     ...defaultDonationPage.contact,
-    ...((page && page.contact) || {}),
+    ...defined(page && page.contact),
   },
   impactItems: page && Array.isArray(page.impactItems) && page.impactItems.length
     ? page.impactItems

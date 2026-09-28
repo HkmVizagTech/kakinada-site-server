@@ -8,10 +8,29 @@
 // this simpler one-time-donation page actually needs.
 
 const fs = require("fs");
+const { prisma } = require("../lib/prisma");
+const { buildWhere } = require("../lib/sqlFilter");
 const { donationModel } = require("../models/donation.model");
 const { uploadToR2 } = require("../utils/r2");
 const { createRazorpayInstance } = require("./payment.controller");
 const { completeDonation } = require("../services/paymentCompletion.service");
+
+/**
+ * Single-row SUM + COUNT over donations matching `filter`. Replaces the four
+ * `[$match, {$group: {_id: null, total: {$sum}}}]` pipelines that all returned
+ * `agg[0]?.total || 0`; COALESCE keeps the zero case in SQL rather than in JS.
+ * The count is the row count of the same match, so the card's `count` and
+ * `value` can never disagree.
+ */
+const sumDonations = async (filter) => {
+  const { sql, params } = buildWhere(filter);
+  const rows = await prisma.$queryRawUnsafe(
+    `SELECT COALESCE(SUM("amount"), 0) AS "total", COUNT(*)::int AS "count"
+       FROM "donations" ${sql}`,
+    ...params
+  );
+  return rows[0];
+};
 
 // Every query here is scoped to the /donations page's own donations only —
 // never mixes in seva-page or campaign donations from the rest of the site.
@@ -64,31 +83,15 @@ const donationAdminController = {
         ],
       };
 
-      const [totalAgg, lastMonthAgg, thisMonthAgg, todayAgg, donorEmails, needsAttentionCount] = await Promise.all([
-        donationModel.aggregate([
-          { $match: baseMatch },
-          { $group: { _id: null, total: { $sum: "$amount" }, count: { $sum: 1 } } },
-        ]),
-        donationModel.aggregate([
-          { $match: { ...baseMatch, createdAt: { $gte: startOfLastMonth, $lte: endOfLastMonth } } },
-          { $group: { _id: null, total: { $sum: "$amount" } } },
-        ]),
-        donationModel.aggregate([
-          { $match: { ...baseMatch, createdAt: { $gte: startOfMonth } } },
-          { $group: { _id: null, total: { $sum: "$amount" } } },
-        ]),
-        donationModel.aggregate([
-          { $match: { ...baseMatch, createdAt: { $gte: startOfToday } } },
-          { $group: { _id: null, total: { $sum: "$amount" } } },
-        ]),
+      const [totalRow, lastMonthTotal, thisMonthTotal, todayTotal, donorEmails, needsAttentionCount] = await Promise.all([
+        sumDonations(baseMatch),
+        sumDonations({ ...baseMatch, createdAt: { $gte: startOfLastMonth, $lte: endOfLastMonth } }).then((r) => r.total),
+        sumDonations({ ...baseMatch, createdAt: { $gte: startOfMonth } }).then((r) => r.total),
+        sumDonations({ ...baseMatch, createdAt: { $gte: startOfToday } }).then((r) => r.total),
         donationModel.distinct("donorEmail", baseMatch),
         donationModel.countDocuments(needsAttentionFilter),
       ]);
-
-      const total = totalAgg[0]?.total || 0;
-      const lastMonthTotal = lastMonthAgg[0]?.total || 0;
-      const thisMonthTotal = thisMonthAgg[0]?.total || 0;
-      const todayTotal = todayAgg[0]?.total || 0;
+      const total = totalRow.total;
 
       const pctChange = (curr, prev) => {
         if (!prev) return null; // no prior-period baseline — don't fabricate a %
@@ -98,7 +101,7 @@ const donationAdminController = {
       res.status(200).json({
         success: true,
         stats: {
-          totalDonations: { value: total, count: totalAgg[0]?.count || 0 },
+          totalDonations: { value: total, count: totalRow.count },
           totalDonors: { value: donorEmails.filter(Boolean).length },
           thisMonth: { value: thisMonthTotal, changePct: pctChange(thisMonthTotal, lastMonthTotal) },
           today: { value: todayTotal },
@@ -172,10 +175,10 @@ const donationAdminController = {
       const limitNum = Math.min(100, Math.max(1, parseInt(limit, 10) || 20));
       const skip = (pageNum - 1) * limitNum;
 
-      const [transactions, totalCount, amountAgg] = await Promise.all([
+      const [transactions, totalCount, amountRow] = await Promise.all([
         donationModel.find(query).sort({ createdAt: -1 }).skip(skip).limit(limitNum).lean(),
         donationModel.countDocuments(query),
-        donationModel.aggregate([{ $match: query }, { $group: { _id: null, total: { $sum: "$amount" } } }]),
+        sumDonations(query),
       ]);
 
       res.status(200).json({
@@ -207,7 +210,7 @@ const donationAdminController = {
           currentPage: pageNum,
           totalPages: Math.ceil(totalCount / limitNum),
           totalTransactions: totalCount,
-          totalAmount: amountAgg[0]?.total || 0,
+          totalAmount: amountRow.total,
           limit: limitNum,
         },
       });
@@ -221,7 +224,10 @@ const donationAdminController = {
   getTransactionById: async (req, res) => {
     try {
       const { id } = req.params;
-      if (!id || !id.match(/^[0-9a-fA-F]{24}$/)) {
+      // Ids are Prisma cuids now, not 24-hex Mongo ObjectIds, so the old
+      // shape test rejected every single real id and this endpoint always
+      // answered 400. Just require a non-empty id and let the lookup 404.
+      if (!id || typeof id !== "string" || !id.trim()) {
         return res.status(400).json({ success: false, message: "Invalid transaction ID" });
       }
       const txn = await donationModel.findOne({ _id: id, ...DONATIONS_PAGE_FILTER }).lean();
@@ -238,32 +244,30 @@ const donationAdminController = {
     try {
       const { startDate, endDate } = req.query;
       const dateMatch = buildDateRangeMatch(startDate, endDate);
-      const stats = await donationModel.aggregate([
-        { $match: { ...DONATIONS_PAGE_FILTER, status: { $in: SUCCESS_STATUSES }, ...dateMatch } },
-        {
-          $group: {
-            _id: {
-              campaign: { $ifNull: ["$utm.campaign", ""] },
-              source: { $ifNull: ["$utm.source", ""] },
-              medium: { $ifNull: ["$utm.medium", ""] },
-            },
-            totalAmount: { $sum: "$amount" },
-            count: { $sum: 1 },
-          },
-        },
-        {
-          $project: {
-            _id: {
-              campaign: { $cond: [{ $eq: ["$_id.campaign", ""] }, "direct", "$_id.campaign"] },
-              source: { $cond: [{ $eq: ["$_id.source", ""] }, "direct", "$_id.source"] },
-              medium: { $cond: [{ $eq: ["$_id.medium", ""] }, "none", "$_id.medium"] },
-            },
-            totalAmount: 1,
-            count: 1,
-          },
-        },
-        { $sort: { totalAmount: -1 } },
-      ]);
+      const utmWhere = buildWhere({
+        ...DONATIONS_PAGE_FILTER,
+        status: { $in: SUCCESS_STATUSES },
+        ...dateMatch,
+      });
+      // jsonb_build_object reproduces the old composite `_id`, and the CASE
+      // expressions below. It must be jsonb rather than json: Postgres has no
+      // equality operator for `json`, so GROUP BY on it raises 42883.
+      // expressions are the $project that relabelled the empty-string buckets
+      // to "direct"/"direct"/"none". Grouping on the built object (rather than
+      // the raw columns) is what collapses those empty buckets together.
+      const stats = await prisma.$queryRawUnsafe(
+        `SELECT jsonb_build_object(
+                  'campaign', CASE WHEN COALESCE("utm"->>'campaign', '') = '' THEN 'direct' ELSE "utm"->>'campaign' END,
+                  'source',   CASE WHEN COALESCE("utm"->>'source',   '') = '' THEN 'direct' ELSE "utm"->>'source'   END,
+                  'medium',   CASE WHEN COALESCE("utm"->>'medium',   '') = '' THEN 'none'   ELSE "utm"->>'medium'   END
+                ) AS "_id",
+                COALESCE(SUM("amount"), 0) AS "totalAmount",
+                COUNT(*)::int AS "count"
+           FROM "donations" ${utmWhere.sql}
+          GROUP BY 1
+          ORDER BY "totalAmount" DESC`,
+        ...utmWhere.params
+      );
       res.status(200).json({ success: true, stats });
     } catch (error) {
       console.error("donationAdmin.getUtmStats error:", error);

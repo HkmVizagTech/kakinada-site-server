@@ -1,4 +1,18 @@
-const { donationModel } = require("../models/donation.model");
+const { prisma } = require("../lib/prisma");
+
+// Was a Mongo aggregation that grouped completed donations into devotees.
+// The two CTEs mirror the original $group and the $addFields/$switch tiering;
+// the tier expression is repeated in the outer WHERE because Postgres cannot
+// reference a SELECT alias in the same query's WHERE.
+const TIER_PATRON = 100000;
+const NEW_CUTOFF_DAYS = 30;
+
+const tierExpr = (cutoffParam) => `
+  CASE
+    WHEN "totalAmount" >= ${TIER_PATRON} THEN 'patron'
+    WHEN "firstDonation" >= $${cutoffParam} THEN 'new'
+    ELSE 'active'
+  END`;
 
 const devoteeController = {
   // ADMIN - real devotee list, aggregated from completed donations
@@ -7,61 +21,56 @@ const devoteeController = {
     try {
       const { q, status, page = 1, limit = 50 } = req.query;
 
-      const pipeline = [
-        { $match: { status: "completed" } },
-        {
-          $group: {
-            _id: { $ifNull: ["$donorEmail", "$donorMobile"] },
-            name: { $last: "$donorName" },
-            email: { $last: "$donorEmail" },
-            phone: { $last: "$donorMobile" },
-            city: { $last: "$prasadamAddress.city" },
-            donations: { $sum: 1 },
-            totalAmount: { $sum: "$amount" },
-            firstDonation: { $min: "$date" },
-            lastDonation: { $max: "$date" },
-          },
-        },
-        {
-          $addFields: {
-            status: {
-              $switch: {
-                branches: [
-                  { case: { $gte: ["$totalAmount", 100000] }, then: "patron" },
-                  {
-                    case: {
-                      $gte: [
-                        "$firstDonation",
-                        new Date(Date.now() - 30 * 24 * 60 * 60 * 1000),
-                      ],
-                    },
-                    then: "new",
-                  },
-                ],
-                default: "active",
-              },
-            },
-          },
-        },
-        { $sort: { totalAmount: -1 } },
-      ];
+      const where = [];
+      const params = [];
+      const push = (v) => {
+        params.push(v);
+        return `$${params.length}`;
+      };
+
+      // Pushed first so it is always $1: the tier expression is referenced
+      // twice (once in the CTE, once in the outer status filter) and both
+      // occurrences must bind the same cutoff date.
+      push(new Date(Date.now() - NEW_CUTOFF_DAYS * 24 * 60 * 60 * 1000));
 
       if (q) {
-        pipeline.push({
-          $match: {
-            $or: [
-              { name: { $regex: q, $options: "i" } },
-              { email: { $regex: q, $options: "i" } },
-              { phone: { $regex: q, $options: "i" } },
-            ],
-          },
-        });
+        // Escaped for LIKE, and applied to the aggregated values exactly as the
+        // original post-$group $match did.
+        const term = `%${String(q).replace(/([\\%_])/g, "\\$1")}%`;
+        where.push(
+          `("name" ILIKE ${push(term)} OR "email" ILIKE ${push(term)} OR "phone" ILIKE ${push(term)})`
+        );
       }
       if (status && status !== "all") {
-        pipeline.push({ $match: { status } });
+        where.push(`${tierExpr(1)} = ${push(status)}`);
       }
 
-      const allResults = await donationModel.aggregate(pipeline);
+      const sql = `
+        WITH grouped AS (
+          SELECT
+            COALESCE("donorEmail", "donorMobile") AS "_id",
+            MAX("donorName")                      AS "name",
+            MAX("donorEmail")                     AS "email",
+            MAX("donorMobile")                    AS "phone",
+            MAX("prasadamAddress"->>'city')       AS "city",
+            COUNT(*)::int                         AS "donations",
+            COALESCE(SUM("amount"), 0)            AS "totalAmount",
+            MIN("date")                           AS "firstDonation",
+            MAX("date")                           AS "lastDonation"
+          FROM "donations"
+          WHERE "status" = 'completed'
+          GROUP BY COALESCE("donorEmail", "donorMobile")
+        ),
+        tiered AS (
+          SELECT grouped.*, ${tierExpr(1)} AS "status"
+          FROM grouped
+        )
+        SELECT * FROM tiered
+        ${where.length ? `WHERE ${where.join(" AND ")}` : ""}
+        ORDER BY "totalAmount" DESC
+      `;
+
+      const allResults = await prisma.$queryRawUnsafe(sql, ...params);
       const pageNum = Math.max(1, parseInt(page, 10) || 1);
       const lim = Math.min(200, Math.max(1, parseInt(limit, 10) || 50));
       const start = (pageNum - 1) * lim;

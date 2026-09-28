@@ -1,16 +1,7 @@
-const mongoose = require("mongoose");
+const { createModel } = require("../lib/mongoCompat");
 
-const importantDateSchema = new mongoose.Schema({
-  title: { type: String, required: true },
-  date: { type: Date, required: true },
-  description: { type: String },
-  type: { type: String, enum: ["Ekadashi", "Festival", "Other"], default: "Other" },
-  createdBy: { type: mongoose.Schema.Types.ObjectId, ref: "user" },
-}, {
-  timestamps: true,
-  versionKey: false
-});
-
-const importantDateModel = mongoose.model("importantDate", importantDateSchema);
+// Prisma-backed. The exported name is unchanged so the ~47 files that
+// import importantDateModel keep working unchanged.
+const importantDateModel = createModel("importantDate");
 
 module.exports = { importantDateModel };

@@ -142,8 +142,86 @@ async function sendTemplateMessageWithAttachment(phone, templateName, bodyParame
   return response.data;
 }
 
+// ── Pending-transaction reminder (Flaxxa path) ─────────────────────────────
+//
+// The counterpart of sendPendingWhatsappViaGupshup(), with an identical
+// signature so pendingReminder.service.js can swap providers with one env var.
+//
+// Flaxxa CANNOT fill a {{1}} inside a template's button URL — every such send
+// comes back with a null wamid and Meta's "(#131008) Required parameter is
+// missing". So the seva link is written into the {{4}} body sentence instead
+// (includeLinkInBody: true) and the approved template's button, if it has one,
+// must be static.
+const PENDING_TEMPLATE_NAME = () =>
+  process.env.WAPI_PENDING_TEMPLATE_NAME || "pending_seva_notice";
+
+async function sendPendingWhatsapp(phone, donorName, amount, sevaName, options = {}) {
+  const normalizedPhone = normalizePhone(phone);
+  if (!normalizedPhone) throw new Error("Invalid or missing phone number");
+
+  const { buildPendingFields } = require("./pendingMessage.util");
+  const { linkSuffix, linkQuery, sourcePage, sevaImage, campaignLabel } = options;
+
+  const fields = buildPendingFields({
+    donorName,
+    amount,
+    sevaName,
+    campaignLabel,
+    linkSuffix: linkSuffix || sourcePage,
+    linkQuery,
+    includeLinkInBody: true,
+  });
+
+  const components = [
+    {
+      type: "body",
+      parameters: [
+        { type: "text", text: fields.name },
+        { type: "text", text: fields.amount },
+        { type: "text", text: fields.seva },
+        { type: "text", text: fields.allocation },
+      ],
+    },
+  ];
+
+  // A media header on this path would have to be uploaded as binary; the
+  // banner is optional, so a template without one still sends cleanly.
+  if (sevaImage) {
+    const os = require("os");
+    const fsp = require("fs");
+    const pathMod = require("path");
+    let tmp = null;
+    try {
+      const res = await fetch(sevaImage);
+      if (!res.ok) throw new Error(`HTTP ${res.status} fetching the seva banner`);
+      const buf = Buffer.from(await res.arrayBuffer());
+      tmp = pathMod.join(os.tmpdir(), `seva-banner-${Date.now()}.jpg`);
+      fsp.writeFileSync(tmp, buf);
+      return await sendTemplateMessageWithAttachment(
+        normalizedPhone,
+        PENDING_TEMPLATE_NAME(),
+        components[0].parameters,
+        tmp,
+        "seva-banner.jpg"
+      );
+    } catch (err) {
+      // A banner is never worth losing the message over.
+      console.warn(
+        "[Flaxxa] Could not attach the seva banner, sending without it:",
+        err && err.message ? err.message : err
+      );
+    } finally {
+      if (tmp) { try { require("fs").unlinkSync(tmp); } catch {} }
+    }
+  }
+
+  return sendTemplateMessage(normalizedPhone, PENDING_TEMPLATE_NAME(), components);
+}
+
 module.exports = {
   isWhatsAppConfigured,
+  sendPendingWhatsapp,
+  getPendingTemplateName: PENDING_TEMPLATE_NAME,
   sendTemplateMessage,
   sendTemplateMessageWithAttachment,
   sendTextMessage,

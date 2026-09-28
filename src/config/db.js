@@ -1,26 +1,33 @@
+// Prisma connection helper.
+//
+// The Prisma client in src/lib/prisma.js is lazy -- it does not open a socket
+// until the first query. This module exists so index.js keeps the same
+// `await connectDb()` startup shape it had with Mongoose, and so a failure to
+// reach Postgres is a clear startup error rather than a crash on first request.
+const { prisma } = require("../lib/prisma");
 
-const mongoose = require("mongoose");
+async function connectDb() {
+  const url = process.env.DATABASE_URL;
+  if (!url) {
+    throw new Error(
+      "DATABASE_URL is not set. On Railway this is injected automatically by " +
+        "the Postgres plugin; locally, copy .env.example to .env and fill it in."
+    );
+  }
 
-
-const connectDb = async() =>{
-    
-    const uri = process.env.MONGO_URI || process.env.MONGODB_URI;
-    const opts = {
-       useNewUrlParser: true,
-       useUnifiedTopology: true,
-       serverSelectionTimeoutMS: 5000,
-       connectTimeoutMS: 10000,
-    };
-    try {
-       if (!uri) {
-           throw new Error('MongoDB connection string not provided. Set MONGODB_URI or MONGO_URI environment variable.');
-       }
-       await mongoose.connect(uri, opts);
-       console.log("MongoDB connected");
-    } catch (error) {
-        console.error("MongoDB connection error:", error);
-        throw error;
-    }
+  try {
+    // A trivial round-trip so a bad host, bad password or a missing migration
+    // fails here at boot instead of on whichever request happens to hit first.
+    await prisma.$queryRaw`SELECT 1`;
+    console.log("PostgreSQL connected");
+  } catch (error) {
+    console.error("PostgreSQL connection error:", error.message);
+    throw error;
+  }
 }
 
-module.exports = { connectDb}
+async function disconnectDb() {
+  await prisma.$disconnect();
+}
+
+module.exports = { connectDb, disconnectDb, prisma };

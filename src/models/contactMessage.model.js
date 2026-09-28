@@ -1,21 +1,7 @@
-const mongoose = require("mongoose");
+const { createModel } = require("../lib/mongoCompat");
 
-const contactMessageSchema = new mongoose.Schema(
-  {
-    name: { type: String, required: true, trim: true },
-    email: { type: String, required: true, trim: true, lowercase: true },
-    phone: { type: String, trim: true, default: "" },
-    subject: { type: String, trim: true, default: "General Enquiry" },
-    message: { type: String, required: true, trim: true },
-    authorization: { type: Boolean, default: false },
-    status: { type: String, enum: ["new", "read", "responded"], default: "new", index: true },
-    source: { type: String, default: "contact-page" },
-  },
-  { timestamps: true, versionKey: false }
-);
-
-contactMessageSchema.index({ createdAt: -1 });
-
-const contactMessageModel = mongoose.model("contactMessage", contactMessageSchema);
+// Prisma-backed. The exported name is unchanged so the ~47 files that
+// import contactMessageModel keep working unchanged.
+const contactMessageModel = createModel("contactMessage");
 
 module.exports = { contactMessageModel };

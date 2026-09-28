@@ -18,19 +18,10 @@ const festivalDonationController = {
       const festivals = await festivalDonationModel.find()
         .populate('createdBy', 'name email')
         .populate('eventId');
-      const donationModule = require('../models/donation.model');
-      console.log('DEBUG donationModule keys:', Object.keys(donationModule));
-      console.log('DEBUG donationModule content:', donationModule);
-      const { donationModel } = donationModule;
-      console.log('DEBUG donationModel type:', typeof donationModel);
-      if (donationModel) {
-        try {
-          console.log('DEBUG donationModel.modelName:', donationModel.modelName);
-          console.log('DEBUG donationModel.countDocuments type:', typeof donationModel.countDocuments);
-        } catch (err) {
-          console.error('DEBUG reading donationModel properties failed:', err);
-        }
-      }
+      // Required here rather than at the top of the file: donation.model and
+      // this module reference each other, and a top-level require would hand
+      // back a half-initialised exports object.
+      const { donationModel } = require('../models/donation.model');
       const festivalsWithDonationCount = await Promise.all(festivals.map(async (festival) => {
         let donationCount = 0;
         try {
